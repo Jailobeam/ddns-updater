@@ -36,7 +36,7 @@
           </label>
           <button class="button secondary hero-control" type="button" id="admin-button" onclick="toggleAdminMode()">{{if .AdminUnlocked}}Admin Logout{{else}}Admin Login{{end}}</button>
           <button class="button secondary hero-control {{if not .AdminUnlocked}}is-hidden{{end}}" type="button" id="change-password-button" onclick="openChangePasswordDialog()" {{if not .AdminUnlocked}}disabled{{end}}>Change password</button>
-          <span class="badge hero-chip hero-control warning-chip {{if or (not .PasswordIsDefault) (not .AdminUnlocked)}}is-hidden{{end}}" id="default-password-badge">Default password: admin</span>
+          <span class="badge hero-chip hero-control warning-chip {{if not .PasswordIsDefault}}is-hidden{{end}}" id="default-password-badge">Default password: admin</span>
           <span class="badge hero-chip hero-control" id="configured-count">{{.ConfiguredCount}} configured</span>
           <span class="badge hero-chip hero-control" id="provider-count">{{.ProviderCount}} providers</span>
         </div>
@@ -790,7 +790,7 @@
       changePasswordButton.classList.toggle('is-hidden', !adminUnlocked);
       newEntryButton.classList.toggle('is-hidden', !adminUnlocked);
       changePasswordButton.disabled = !adminUnlocked;
-      defaultPasswordBadge.classList.toggle('is-hidden', !passwordIsDefault || !adminUnlocked);
+      defaultPasswordBadge.classList.toggle('is-hidden', !passwordIsDefault);
       renderEntries(state.configEntries || []);
     }
 
