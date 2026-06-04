@@ -1,8 +1,8 @@
 # Changelog
 
-## v1.0.0 - 2026-06-04
+## v2.10.0-jailobeam1 - 2026-06-04
 
-Initial public release of the custom `ddns-updater` fork.
+First fork release rebased on upstream `v2.10.0`.
 
 ### Added
 
