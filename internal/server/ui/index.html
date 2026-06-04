@@ -1,0 +1,1065 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <title>DDNS Updater</title>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark light">
+  <link rel="icon" href="{{.RootURL}}/static/favicon.svg" sizes="any" type="image/svg+xml">
+  <link rel="icon" href="{{.RootURL}}/static/favicon.ico" type="image/x-icon">
+  <link rel="stylesheet" href="{{.RootURL}}/static/styles.css" type="text/css">
+</head>
+
+<body>
+  <div class="page-shell">
+    <div class="page">
+      <header class="hero">
+        <div class="hero-copy">
+          <span class="eyebrow">Dynamic DNS control panel</span>
+          <h1>DDNS Updater</h1>
+          <p>Live status and a compact editor for all documented providers.</p>
+        </div>
+
+        <div class="hero-actions">
+          <button class="button secondary hero-control {{if not .AdminUnlocked}}is-hidden{{end}}" type="button" id="run-update-button" onclick="runUpdateNow()">Run update now</button>
+          <button class="button secondary hero-control" type="button" onclick="refreshOverview()">Refresh</button>
+          <label class="top-control hero-control {{if not .AdminUnlocked}}is-hidden{{end}}" id="period-control">
+            <span>Update</span>
+            <select id="period-select" {{if not .AdminUnlocked}}disabled{{end}}>
+              <option value="1m" {{if eq .CurrentPeriod "1m"}}selected{{end}}>1m</option>
+              <option value="2m" {{if eq .CurrentPeriod "2m"}}selected{{end}}>2m</option>
+              <option value="5m" {{if eq .CurrentPeriod "5m"}}selected{{end}}>5m</option>
+              <option value="10m" {{if eq .CurrentPeriod "10m"}}selected{{end}}>10m</option>
+              <option value="15m" {{if eq .CurrentPeriod "15m"}}selected{{end}}>15m</option>
+            </select>
+          </label>
+          <button class="button secondary hero-control" type="button" id="admin-button" onclick="toggleAdminMode()">{{if .AdminUnlocked}}Admin Logout{{else}}Admin Login{{end}}</button>
+          <button class="button secondary hero-control {{if not .AdminUnlocked}}is-hidden{{end}}" type="button" id="change-password-button" onclick="openChangePasswordDialog()" {{if not .AdminUnlocked}}disabled{{end}}>Change password</button>
+          <span class="badge hero-chip hero-control warning-chip {{if or (not .PasswordIsDefault) (not .AdminUnlocked)}}is-hidden{{end}}" id="default-password-badge">Default password: admin</span>
+          <span class="badge hero-chip hero-control" id="configured-count">{{.ConfiguredCount}} configured</span>
+          <span class="badge hero-chip hero-control" id="provider-count">{{.ProviderCount}} providers</span>
+        </div>
+      </header>
+
+      {{if .Message}}
+      <section class="notice success">{{.Message}}</section>
+      {{end}}
+      {{if .Error}}
+      <section class="notice error">{{.Error}}</section>
+      {{end}}
+      {{if not .Editable}}
+      <section class="notice warn">{{.DisabledReason}}</section>
+      {{end}}
+
+      <div class="layout single-column">
+        <section class="panel combined-panel">
+          <div class="panel-header config-header">
+            <div>
+              <span class="section-kicker">Overview</span>
+              <h2>Entries</h2>
+              <p>Each row combines configuration, live status and actions.</p>
+            </div>
+            <button class="button {{if not .AdminUnlocked}}is-hidden{{end}}" type="button" id="new-entry-button" onclick="openEditorForNew()" {{if not .AdminUnlocked}}disabled{{end}}>New entry</button>
+          </div>
+
+          <div class="entry-list wide-list" id="entry-list">
+            {{if .ConfigEntries}}
+            {{range .ConfigEntries}}
+            <article class="entry-card combined-entry {{if .Disabled}}entry-disabled{{end}}">
+              <div class="entry-main">
+                <div class="entry-heading">
+                  <strong>{{.Domain}}</strong>
+                  <span class="entry-pill">{{.Provider}}</span>
+                  <span class="entry-pill muted">{{.IPVersion}}</span>
+                  {{if .Owner}}
+                  <span class="entry-pill muted">{{.Owner}}</span>
+                  {{end}}
+                  {{if .Disabled}}
+                  <span class="entry-pill warning">inactive</span>
+                  {{else}}
+                  <span class="entry-pill success-pill">active</span>
+                  {{end}}
+                </div>
+                <small>{{.Summary}}</small>
+              </div>
+
+              <div class="entry-live">
+                <div class="entry-statusline">
+                  <span class="live-status {{.StatusTone}}">{{.Status}}</span>
+                </div>
+                <small>Current IP: {{.CurrentIP}}</small>
+                <small>Previous IPs: {{.PreviousIPs}}</small>
+              </div>
+
+              <div class="entry-actions row-actions {{if not $.AdminUnlocked}}is-hidden{{end}}">
+                <button class="button tiny secondary" type="button" onclick="editEntry({{.Index}})" {{if not $.AdminUnlocked}}disabled{{end}}>Edit</button>
+                <form method="post" action="{{$.RootURL}}/settings/toggle">
+                  <input type="hidden" name="index" value="{{.Index}}">
+                  <button class="button tiny secondary" type="submit" {{if not $.AdminUnlocked}}disabled{{end}}>{{if .Disabled}}Activate{{else}}Deactivate{{end}}</button>
+                </form>
+                <form method="post" action="{{$.RootURL}}/settings/delete" onsubmit="return confirmDelete('{{.Domain}}')">
+                  <input type="hidden" name="index" value="{{.Index}}">
+                  <button class="button tiny danger" type="submit" {{if not $.AdminUnlocked}}disabled{{end}}>Delete</button>
+                </form>
+              </div>
+            </article>
+            {{end}}
+            {{else}}
+            <p class="empty-state">No configuration entries yet.</p>
+            {{end}}
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <div id="editor-overlay" class="editor-overlay is-hidden" onclick="closeEditorOnBackdrop(event)">
+      <section class="editor-dialog" id="editor-dialog" aria-modal="true" role="dialog" aria-labelledby="editor-title">
+        <div class="subpanel editor-panel">
+          <div class="subpanel-header editor-header">
+            <div>
+              <h3 id="editor-title">New entry</h3>
+              <p class="subtle">Choose a provider, fill in the fields, then save.</p>
+            </div>
+            <div class="editor-toolbar">
+              <a id="provider-doc-link" class="text-link" href="https://github.com/qdm12/ddns-updater/tree/master/docs" target="_blank" rel="noreferrer">Provider docs</a>
+              <button class="button tiny secondary" type="button" onclick="closeEditor()">Close</button>
+            </div>
+          </div>
+
+          <div id="provider-note" class="callout info">
+            Pick a provider to show the required provider-specific fields.
+          </div>
+
+          <form id="settings-form" method="post" action="{{.RootURL}}/settings/save">
+            <input type="hidden" id="index" name="index" value="">
+            <input type="hidden" id="payload" name="payload" value="">
+
+            <div class="field-grid field-grid-top">
+              <label class="field">
+                <span>Provider</span>
+                <select id="provider" {{if not .Editable}}disabled{{end}}></select>
+              </label>
+
+              <label class="field">
+                <span>Domain</span>
+                <input id="domain" type="text" placeholder="example.com or sub.example.com" {{if not .Editable}}disabled{{end}}>
+                <small>Full record to update, for example <code>home.example.com</code>.</small>
+              </label>
+
+              <label class="field">
+                <span>IP Version</span>
+                <select id="ip_version" {{if not .Editable}}disabled{{end}}>
+                  <option value="ipv4 or ipv6">ipv4 or ipv6</option>
+                  <option value="ipv4">ipv4</option>
+                  <option value="ipv6">ipv6</option>
+                </select>
+              </label>
+
+              <label class="field">
+                <span>IPv6 Suffix</span>
+                <input id="ipv6_suffix" type="text" placeholder="optional" {{if not .Editable}}disabled{{end}}>
+                <small>Only needed for a stable IPv6 suffix.</small>
+              </label>
+            </div>
+
+            <div id="provider-fields" class="provider-fields"></div>
+
+            <details class="advanced-fields">
+              <summary>Additional JSON fields</summary>
+              <label class="field compact-field">
+                <textarea id="extra_json" rows="4" placeholder='{"custom_key":"value"}' {{if not .Editable}}disabled{{end}}></textarea>
+                <small>Only for advanced provider options not shown above.</small>
+              </label>
+            </details>
+
+            <div class="form-actions">
+              <button class="button" type="submit" {{if or (not .Editable) (not .AdminUnlocked)}}disabled{{end}}>Save configuration</button>
+              <button class="button secondary" type="button" onclick="closeEditor()">Cancel</button>
+            </div>
+          </form>
+        </div>
+      </section>
+    </div>
+
+    <div id="admin-overlay" class="editor-overlay is-hidden" onclick="closeAdminDialogOnBackdrop(event)">
+      <section class="editor-dialog compact-dialog" id="admin-dialog" aria-modal="true" role="dialog" aria-labelledby="admin-dialog-title">
+        <div class="subpanel editor-panel">
+          <div class="subpanel-header editor-header">
+            <div>
+              <h3 id="admin-dialog-title">Admin unlock</h3>
+              <p class="subtle" id="admin-dialog-subtitle">Unlock protected settings with the admin password.</p>
+            </div>
+            <button class="button tiny secondary" type="button" onclick="closeAdminDialog()">Close</button>
+          </div>
+
+          <section class="notice warn admin-default-notice {{if not .PasswordIsDefault}}is-hidden{{end}}" id="admin-default-notice">
+            The initial admin password is currently <code>admin</code>. Change it after unlocking.
+          </section>
+
+          <form id="admin-unlock-form">
+            <div class="field-grid single-field-grid">
+              <label class="field">
+                <span>Admin password</span>
+                <input id="admin-unlock-password" type="password" autocomplete="current-password">
+              </label>
+            </div>
+
+            <div class="form-actions">
+              <button class="button" type="submit">Unlock admin</button>
+              <button class="button secondary" type="button" onclick="closeAdminDialog()">Cancel</button>
+            </div>
+          </form>
+
+          <form id="admin-password-form" class="is-hidden">
+            <div class="field-grid single-field-grid">
+              <label class="field">
+                <span>New password</span>
+                <input id="admin-new-password" type="password" autocomplete="new-password">
+                <small>Minimum 4 characters.</small>
+              </label>
+
+              <label class="field">
+                <span>Confirm password</span>
+                <input id="admin-confirm-password" type="password" autocomplete="new-password">
+              </label>
+            </div>
+
+            <div class="form-actions">
+              <button class="button" type="submit">Save password</button>
+              <button class="button secondary" type="button" onclick="closeAdminDialog()">Cancel</button>
+            </div>
+          </form>
+        </div>
+      </section>
+    </div>
+
+    <footer class="page-footer">
+      <div>
+        <a href="https://github.com/qdm12/ddns-updater" class="text-big">
+          <svg class="github-icon" height="1em" aria-hidden="true" viewBox="0 0 16 16" version="1.1"
+            data-view-component="true">
+            <path
+              d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z">
+            </path>
+          </svg>
+        </a>
+      </div>
+      <div>by <a href="https://github.com/qdm12">Quentin McGaw</a> / UI reworked by <a
+          href="https://github.com/Jailobeam">Jailobeam</a></div>
+    </footer>
+  </div>
+
+  <script>
+    function decodeBase64(text) {
+      return decodeURIComponent(escape(window.atob(text)));
+    }
+
+    const providerSchemas = JSON.parse(decodeBase64('{{.SchemasJSONB64}}'));
+    let currentSettings = JSON.parse(decodeBase64('{{.ConfigJSONB64}}'));
+    const providerSchemaMap = Object.fromEntries(providerSchemas.map(schema => [schema.name, schema]));
+    const commonFieldNames = new Set(['provider', 'domain', 'ip_version', 'ipv6_suffix', 'disabled']);
+
+    const providerSelect = document.getElementById('provider');
+    const providerFields = document.getElementById('provider-fields');
+    const providerNote = document.getElementById('provider-note');
+    const providerDocLink = document.getElementById('provider-doc-link');
+    const editorOverlay = document.getElementById('editor-overlay');
+    const editorDialog = document.getElementById('editor-dialog');
+    const editorTitle = document.getElementById('editor-title');
+    const settingsForm = document.getElementById('settings-form');
+    const entryList = document.getElementById('entry-list');
+    const configuredCountBadge = document.getElementById('configured-count');
+    const providerCountBadge = document.getElementById('provider-count');
+    const periodSelect = document.getElementById('period-select');
+    const periodControl = document.getElementById('period-control');
+    const adminButton = document.getElementById('admin-button');
+    const runUpdateButton = document.getElementById('run-update-button');
+    const changePasswordButton = document.getElementById('change-password-button');
+    const defaultPasswordBadge = document.getElementById('default-password-badge');
+    const newEntryButton = document.getElementById('new-entry-button');
+    const adminOverlay = document.getElementById('admin-overlay');
+    const adminDialog = document.getElementById('admin-dialog');
+    const adminDialogTitle = document.getElementById('admin-dialog-title');
+    const adminDialogSubtitle = document.getElementById('admin-dialog-subtitle');
+    const adminDefaultNotice = document.getElementById('admin-default-notice');
+    const adminUnlockForm = document.getElementById('admin-unlock-form');
+    const adminPasswordForm = document.getElementById('admin-password-form');
+    const adminUnlockPasswordInput = document.getElementById('admin-unlock-password');
+    const adminNewPasswordInput = document.getElementById('admin-new-password');
+    const adminConfirmPasswordInput = document.getElementById('admin-confirm-password');
+    let adminUnlocked = {{if .AdminUnlocked}}true{{else}}false{{end}};
+    let passwordIsDefault = {{if .PasswordIsDefault}}true{{else}}false{{end}};
+    const rootURL = '{{.RootURL}}';
+
+    function buildProviderOptions() {
+      const placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = 'Choose provider...';
+      providerSelect.appendChild(placeholder);
+
+      providerSchemas.forEach(schema => {
+        const option = document.createElement('option');
+        option.value = schema.name;
+        option.textContent = schema.title + ' (' + schema.name + ')';
+        providerSelect.appendChild(option);
+      });
+    }
+
+    function fieldValueToString(value, type) {
+      if (value === undefined || value === null) {
+        return '';
+      }
+      if (type === 'json') {
+        return JSON.stringify(value, null, 2);
+      }
+      return String(value);
+    }
+
+    function getSchemaField(schema, fieldName) {
+      if (!schema) {
+        return null;
+      }
+      return schema.fields.find(field => field.name === fieldName) || null;
+    }
+
+    function createField(field, currentValue, options = {}) {
+      const wrapper = document.createElement('label');
+      wrapper.className = 'field';
+      wrapper.dataset.fieldName = field.name;
+
+      if (options.authMode) {
+        wrapper.dataset.authMode = options.authMode;
+      }
+
+      if (field.type === 'checkbox') {
+        wrapper.classList.add('field-checkbox');
+      }
+
+      const title = document.createElement('span');
+      title.textContent = field.label + (options.forceRequired || field.required ? ' *' : '');
+      wrapper.appendChild(title);
+
+      let input;
+      if (field.type === 'json') {
+        input = document.createElement('textarea');
+        input.rows = 6;
+      } else if (field.type === 'checkbox') {
+        input = document.createElement('input');
+        input.type = 'checkbox';
+      } else {
+        input = document.createElement('input');
+        input.type = field.secret ? 'password' : (field.type === 'number' ? 'number' : 'text');
+      }
+
+      input.dataset.fieldName = field.name;
+      input.dataset.fieldType = field.type;
+      input.dataset.fieldRequired = options.forceRequired || field.required ? 'true' : 'false';
+
+      if (field.type === 'checkbox') {
+        input.checked = currentValue === true;
+      } else {
+        input.value = fieldValueToString(currentValue, field.type);
+      }
+
+      if (options.placeholder) {
+        input.placeholder = options.placeholder;
+      }
+
+      wrapper.appendChild(input);
+
+      if (field.description) {
+        const description = document.createElement('small');
+        description.textContent = field.description;
+        wrapper.appendChild(description);
+      }
+
+      return wrapper;
+    }
+
+    function setProviderHelp(providerName) {
+      const schema = providerSchemaMap[providerName];
+      if (!schema) {
+        providerNote.textContent = 'Pick a provider to show the required provider-specific fields.';
+        providerDocLink.href = 'https://github.com/qdm12/ddns-updater/tree/master/docs';
+        return;
+      }
+
+      providerDocLink.href = 'https://github.com/qdm12/ddns-updater/blob/master/docs/' + schema.doc;
+
+      if (providerName === 'cloudflare') {
+        providerNote.innerHTML = '<strong>Cloudflare setup</strong><p>Use exactly one authentication method. Best choice: API token with DNS edit permission. <code>Zone ID</code> is not your domain name.</p>';
+        return;
+      }
+
+      providerNote.innerHTML = '<strong>' + schema.title + '</strong><p>Provider-specific fields come from the upstream documentation. Use Additional JSON only for advanced options not shown here.</p>';
+    }
+
+    function detectCloudflareAuthMode(values) {
+      if (values.user_service_key) {
+        return 'user_service_key';
+      }
+      if (values.email || values.key) {
+        return 'email_key';
+      }
+      return 'token';
+    }
+
+    function updateCloudflareAuthVisibility() {
+      const authModeInput = document.querySelector('input[name="cloudflare_auth_mode"]:checked');
+      const activeMode = authModeInput ? authModeInput.value : 'token';
+
+      providerFields.querySelectorAll('[data-auth-mode]').forEach(element => {
+        const visible = element.dataset.authMode === activeMode;
+        element.classList.toggle('is-hidden', !visible);
+        element.querySelectorAll('input, textarea, select').forEach(input => {
+          input.disabled = !visible;
+        });
+      });
+    }
+
+    function renderCloudflareFields(schema, values) {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'provider-stack';
+
+      const authModes = document.createElement('fieldset');
+      authModes.className = 'choice-group';
+
+      const legend = document.createElement('legend');
+      legend.textContent = 'Cloudflare authentication';
+      authModes.appendChild(legend);
+
+      const choiceHelp = document.createElement('p');
+      choiceHelp.className = 'choice-help';
+      choiceHelp.textContent = 'Choose exactly one method. If you already have an API token, use that.';
+      authModes.appendChild(choiceHelp);
+
+      const choices = document.createElement('div');
+      choices.className = 'choice-grid';
+      const activeMode = detectCloudflareAuthMode(values);
+      const items = [
+        {
+          value: 'token',
+          title: 'API token',
+          body: 'Recommended. Needs DNS edit permission.'
+        },
+        {
+          value: 'email_key',
+          title: 'Email + global API key',
+          body: 'Use this only with Cloudflare\'s global API key.'
+        },
+        {
+          value: 'user_service_key',
+          title: 'User service key',
+          body: 'Alternative method for some setups.'
+        }
+      ];
+
+      items.forEach(item => {
+        const option = document.createElement('label');
+        option.className = 'choice-card';
+
+        const radio = document.createElement('input');
+        radio.type = 'radio';
+        radio.name = 'cloudflare_auth_mode';
+        radio.value = item.value;
+        radio.checked = item.value === activeMode;
+        radio.addEventListener('change', updateCloudflareAuthVisibility);
+        option.appendChild(radio);
+
+        const content = document.createElement('div');
+        content.innerHTML = '<strong>' + item.title + '</strong><small>' + item.body + '</small>';
+        option.appendChild(content);
+
+        choices.appendChild(option);
+      });
+
+      authModes.appendChild(choices);
+      wrapper.appendChild(authModes);
+
+      const generalGrid = document.createElement('div');
+      generalGrid.className = 'field-grid';
+
+      const zoneField = getSchemaField(schema, 'zone_identifier');
+      if (zoneField) {
+        generalGrid.appendChild(createField(zoneField, values.zone_identifier, {
+          placeholder: 'Cloudflare Zone ID'
+        }));
+      }
+
+      const ttlField = getSchemaField(schema, 'ttl');
+      if (ttlField) {
+        const ttlValue = values.ttl === undefined ? 1 : values.ttl;
+        generalGrid.appendChild(createField(ttlField, ttlValue, {
+          placeholder: '1 for automatic'
+        }));
+      }
+
+      const proxiedField = getSchemaField(schema, 'proxied');
+      if (proxiedField) {
+        generalGrid.appendChild(createField(proxiedField, values.proxied));
+      }
+
+      wrapper.appendChild(generalGrid);
+
+      const authGrid = document.createElement('div');
+      authGrid.className = 'field-grid';
+
+      const tokenField = getSchemaField(schema, 'token');
+      if (tokenField) {
+        authGrid.appendChild(createField(tokenField, values.token, {
+          authMode: 'token',
+          forceRequired: activeMode === 'token'
+        }));
+      }
+
+      const emailField = getSchemaField(schema, 'email');
+      if (emailField) {
+        authGrid.appendChild(createField(emailField, values.email, {
+          authMode: 'email_key',
+          forceRequired: activeMode === 'email_key'
+        }));
+      }
+
+      const keyField = getSchemaField(schema, 'key');
+      if (keyField) {
+        authGrid.appendChild(createField(keyField, values.key, {
+          authMode: 'email_key',
+          forceRequired: activeMode === 'email_key'
+        }));
+      }
+
+      const userServiceKeyField = getSchemaField(schema, 'user_service_key');
+      if (userServiceKeyField) {
+        authGrid.appendChild(createField(userServiceKeyField, values.user_service_key, {
+          authMode: 'user_service_key',
+          forceRequired: activeMode === 'user_service_key'
+        }));
+      }
+
+      wrapper.appendChild(authGrid);
+      providerFields.appendChild(wrapper);
+      updateCloudflareAuthVisibility();
+    }
+
+    function renderProviderFields(providerName, values) {
+      providerFields.innerHTML = '';
+      const schema = providerSchemaMap[providerName];
+      if (!schema) {
+        setProviderHelp('');
+        return;
+      }
+
+      setProviderHelp(providerName);
+
+      if (providerName === 'cloudflare') {
+        renderCloudflareFields(schema, values);
+        return;
+      }
+
+      const fieldGrid = document.createElement('div');
+      fieldGrid.className = 'field-grid';
+
+      schema.fields
+        .filter(field => !field.common)
+        .forEach(field => {
+          fieldGrid.appendChild(createField(field, values[field.name]));
+        });
+
+      providerFields.appendChild(fieldGrid);
+    }
+
+    function readKnownFieldNames(providerName) {
+      const schema = providerSchemaMap[providerName];
+      const names = new Set(commonFieldNames);
+      if (!schema) {
+        return names;
+      }
+      schema.fields.forEach(field => names.add(field.name));
+      return names;
+    }
+
+    function providerDefaults(providerName) {
+      if (providerName === 'cloudflare') {
+        return {
+          provider: 'cloudflare',
+          ttl: 1
+        };
+      }
+      if (!providerName) {
+        return {
+          provider: ''
+        };
+      }
+      return {
+        provider: providerName
+      };
+    }
+
+    function fillForm(values, index) {
+      const providerName = values.provider || '';
+      const mergedValues = Object.assign({}, providerDefaults(providerName), values);
+
+      document.getElementById('index').value = index === null ? '' : String(index);
+      providerSelect.value = providerName;
+      document.getElementById('domain').value = mergedValues.domain || '';
+      document.getElementById('ip_version').value = mergedValues.ip_version || 'ipv4 or ipv6';
+      document.getElementById('ipv6_suffix').value = mergedValues.ipv6_suffix || '';
+
+      renderProviderFields(providerName, mergedValues);
+
+      const knownFieldNames = readKnownFieldNames(providerName);
+      const extra = {};
+      Object.entries(mergedValues).forEach(([key, value]) => {
+        if (!knownFieldNames.has(key)) {
+          extra[key] = value;
+        }
+      });
+      document.getElementById('extra_json').value = Object.keys(extra).length === 0 ? '' : JSON.stringify(extra, null, 2);
+      editorTitle.textContent = index === null ? 'New entry' : 'Edit entry #' + index;
+    }
+
+    function focusEditorField(fieldId) {
+      const field = document.getElementById(fieldId);
+      if (!field) {
+        return;
+      }
+      window.requestAnimationFrame(() => {
+        field.focus();
+      });
+    }
+
+    function openEditor(focusFieldId) {
+      editorOverlay.classList.remove('is-hidden');
+      document.body.classList.add('modal-open');
+      editorDialog.scrollTop = 0;
+      if (focusFieldId) {
+        focusEditorField(focusFieldId);
+      }
+    }
+
+    function closeEditor() {
+      editorOverlay.classList.add('is-hidden');
+      document.body.classList.remove('modal-open');
+    }
+
+    function closeEditorOnBackdrop(event) {
+      if (event.target === editorOverlay) {
+        closeEditor();
+      }
+    }
+
+    function openAdminDialog(mode) {
+      adminDialog.dataset.mode = mode;
+      adminOverlay.classList.remove('is-hidden');
+      document.body.classList.add('modal-open');
+      adminDialog.scrollTop = 0;
+
+      const unlockMode = mode === 'unlock';
+      adminUnlockForm.classList.toggle('is-hidden', !unlockMode);
+      adminPasswordForm.classList.toggle('is-hidden', unlockMode);
+      adminDefaultNotice.classList.toggle('is-hidden', !passwordIsDefault);
+
+      if (unlockMode) {
+        adminDialogTitle.textContent = 'Admin unlock';
+        adminDialogSubtitle.textContent = 'Unlock protected settings with the admin password.';
+        adminUnlockPasswordInput.value = '';
+        focusEditorField('admin-unlock-password');
+      } else {
+        adminDialogTitle.textContent = 'Change admin password';
+        adminDialogSubtitle.textContent = 'Replace the current admin password with a new one.';
+        adminNewPasswordInput.value = '';
+        adminConfirmPasswordInput.value = '';
+        focusEditorField('admin-new-password');
+      }
+    }
+
+    function closeAdminDialog() {
+      adminOverlay.classList.add('is-hidden');
+      document.body.classList.remove('modal-open');
+    }
+
+    function closeAdminDialogOnBackdrop(event) {
+      if (event.target === adminOverlay) {
+        closeAdminDialog();
+      }
+    }
+
+    function openEditorForNew() {
+      if (!adminUnlocked) {
+        window.alert('Unlock admin mode first.');
+        return;
+      }
+      fillForm(providerDefaults(''), null);
+      openEditor('provider');
+    }
+
+    function editEntry(index) {
+      if (!adminUnlocked) {
+        window.alert('Unlock admin mode first.');
+        return;
+      }
+      fillForm(currentSettings[index], index);
+      openEditor('domain');
+    }
+
+    function confirmDelete(domain) {
+      return window.confirm('Delete the DDNS entry for ' + domain + '?');
+    }
+
+    function escapeHTML(value) {
+      return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function renderEntries(entries) {
+      if (!entries.length) {
+        entryList.innerHTML = '<p class="empty-state">No configuration entries yet.</p>';
+        return;
+      }
+
+      entryList.innerHTML = entries.map(entry => {
+        const statePill = entry.Disabled
+          ? '<span class="entry-pill warning">inactive</span>'
+          : '<span class="entry-pill success-pill">active</span>';
+        const ownerPill = entry.Owner ? '<span class="entry-pill muted">' + escapeHTML(entry.Owner) + '</span>' : '';
+        const disabledClass = entry.Disabled ? ' entry-disabled' : '';
+        const actionDisabled = adminUnlocked ? '' : ' disabled';
+        const actionHiddenClass = adminUnlocked ? '' : ' is-hidden';
+        const toggleLabel = entry.Disabled ? 'Activate' : 'Deactivate';
+        return `
+          <article class="entry-card combined-entry${disabledClass}">
+            <div class="entry-main">
+              <div class="entry-heading">
+                <strong>${escapeHTML(entry.Domain)}</strong>
+                <span class="entry-pill">${escapeHTML(entry.Provider)}</span>
+                <span class="entry-pill muted">${escapeHTML(entry.IPVersion)}</span>
+                ${ownerPill}
+                ${statePill}
+              </div>
+              <small>${escapeHTML(entry.Summary)}</small>
+            </div>
+            <div class="entry-live">
+              <div class="entry-statusline">
+                <span class="live-status ${escapeHTML(entry.StatusTone)}">${escapeHTML(entry.Status)}</span>
+              </div>
+              <small>Current IP: ${escapeHTML(entry.CurrentIP)}</small>
+              <small>Previous IPs: ${escapeHTML(entry.PreviousIPs)}</small>
+            </div>
+            <div class="entry-actions row-actions${actionHiddenClass}">
+              <button class="button tiny secondary" type="button" onclick="editEntry(${entry.Index})"${actionDisabled}>Edit</button>
+              <form method="post" action="${rootURL}/settings/toggle">
+                <input type="hidden" name="index" value="${entry.Index}">
+                <button class="button tiny secondary" type="submit"${actionDisabled}>${toggleLabel}</button>
+              </form>
+              <form method="post" action="${rootURL}/settings/delete" onsubmit="return confirmDelete('${escapeHTML(entry.Domain)}')">
+                <input type="hidden" name="index" value="${entry.Index}">
+                <button class="button tiny danger" type="submit"${actionDisabled}>Delete</button>
+              </form>
+            </div>
+          </article>`;
+      }).join('');
+    }
+
+    async function fetchState() {
+      const response = await fetch(rootURL + '/api/state', {
+        credentials: 'same-origin'
+      });
+      if (!response.ok) {
+        throw new Error('Could not refresh overview');
+      }
+      return response.json();
+    }
+
+    function applyState(state) {
+      adminUnlocked = state.adminUnlocked;
+      passwordIsDefault = !!state.passwordIsDefault;
+      currentSettings = state.settings || currentSettings;
+      configuredCountBadge.textContent = state.configuredCount + ' configured';
+      providerCountBadge.textContent = state.providerCount + ' providers';
+      periodSelect.value = state.currentPeriod;
+      periodSelect.disabled = !adminUnlocked;
+      adminButton.textContent = adminUnlocked ? 'Admin Logout' : 'Admin Login';
+      newEntryButton.disabled = !adminUnlocked;
+      runUpdateButton.classList.toggle('is-hidden', !adminUnlocked);
+      periodControl.classList.toggle('is-hidden', !adminUnlocked);
+      changePasswordButton.classList.toggle('is-hidden', !adminUnlocked);
+      newEntryButton.classList.toggle('is-hidden', !adminUnlocked);
+      changePasswordButton.disabled = !adminUnlocked;
+      defaultPasswordBadge.classList.toggle('is-hidden', !passwordIsDefault || !adminUnlocked);
+      renderEntries(state.configEntries || []);
+    }
+
+    async function refreshOverview() {
+      try {
+        const state = await fetchState();
+        applyState(state);
+      } catch (error) {
+        console.error(error);
+      }
+    }
+
+    async function runUpdateNow() {
+      const response = await fetch(rootURL + '/api/update', {
+        method: 'POST',
+        credentials: 'same-origin'
+      });
+      const result = await response.json();
+      window.alert(result.message || 'Update finished');
+      await refreshOverview();
+    }
+
+    async function toggleAdminMode() {
+      if (adminUnlocked) {
+        await fetch(rootURL + '/api/admin/lock', {
+          method: 'POST',
+          credentials: 'same-origin'
+        });
+        adminUnlocked = false;
+        await refreshOverview();
+        return;
+      }
+      openAdminDialog('unlock');
+    }
+
+    function openChangePasswordDialog() {
+      if (!adminUnlocked) {
+        window.alert('Unlock admin mode first.');
+        return;
+      }
+      openAdminDialog('password');
+    }
+
+    adminUnlockForm.addEventListener('submit', async event => {
+      event.preventDefault();
+      const password = adminUnlockPasswordInput.value;
+      if (!password) {
+        window.alert('Enter the admin password.');
+        return;
+      }
+      const body = new URLSearchParams();
+      body.set('password', password);
+      const response = await fetch(rootURL + '/api/admin/unlock', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: body.toString()
+      });
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        window.alert(result.error || 'Admin unlock failed');
+        return;
+      }
+      closeAdminDialog();
+      await refreshOverview();
+    });
+
+    adminPasswordForm.addEventListener('submit', async event => {
+      event.preventDefault();
+      const newPassword = adminNewPasswordInput.value;
+      const confirmPassword = adminConfirmPasswordInput.value;
+      if (!newPassword) {
+        window.alert('Enter a new admin password.');
+        return;
+      }
+      if (newPassword !== confirmPassword) {
+        window.alert('Password confirmation does not match.');
+        return;
+      }
+
+      const body = new URLSearchParams();
+      body.set('new_password', newPassword);
+      body.set('confirm_password', confirmPassword);
+      const response = await fetch(rootURL + '/api/admin/password', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: body.toString()
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        window.alert(result.error || 'Could not change admin password');
+        return;
+      }
+      passwordIsDefault = false;
+      closeAdminDialog();
+      await refreshOverview();
+      window.alert(result.message || 'Admin password changed');
+    });
+
+    function collectFieldValue(input, field) {
+      if (field.type === 'checkbox') {
+        return input.checked ? true : undefined;
+      }
+
+      const rawValue = input.value.trim();
+      if (!rawValue) {
+        return undefined;
+      }
+
+      if (field.type === 'number') {
+        return Number(rawValue);
+      }
+
+      if (field.type === 'json') {
+        return JSON.parse(rawValue);
+      }
+
+      return rawValue;
+    }
+
+    providerSelect.addEventListener('change', () => {
+      const currentValues = {
+        provider: providerSelect.value,
+        domain: document.getElementById('domain').value,
+        ip_version: document.getElementById('ip_version').value,
+        ipv6_suffix: document.getElementById('ipv6_suffix').value
+      };
+      fillForm(currentValues, document.getElementById('index').value === '' ? null : Number(document.getElementById('index').value));
+    });
+
+    settingsForm.addEventListener('submit', event => {
+      try {
+        if (!adminUnlocked) {
+          throw new Error('Unlock admin mode first');
+        }
+        const providerName = providerSelect.value;
+        const schema = providerSchemaMap[providerName];
+        const payload = {
+          provider: providerName,
+          domain: document.getElementById('domain').value.trim()
+        };
+
+        if (!providerName) {
+          throw new Error('Provider is required');
+        }
+        if (!payload.domain) {
+          throw new Error('Domain is required');
+        }
+
+        const ipVersion = document.getElementById('ip_version').value.trim();
+        if (ipVersion) {
+          payload.ip_version = ipVersion;
+        }
+
+        const ipv6Suffix = document.getElementById('ipv6_suffix').value.trim();
+        if (ipv6Suffix) {
+          payload.ipv6_suffix = ipv6Suffix;
+        }
+
+        const existingIndex = document.getElementById('index').value;
+        if (existingIndex !== '') {
+          const existingEntry = currentSettings[Number(existingIndex)];
+          if (existingEntry && existingEntry.disabled === true) {
+            payload.disabled = true;
+          }
+        }
+
+        if (schema) {
+          schema.fields.filter(field => !field.common).forEach(field => {
+            if (providerName === 'cloudflare' && ['token', 'email', 'key', 'user_service_key'].includes(field.name)) {
+              const activeModeInput = document.querySelector('input[name="cloudflare_auth_mode"]:checked');
+              const activeMode = activeModeInput ? activeModeInput.value : 'token';
+              const allowedModes = {
+                token: ['token'],
+                email_key: ['email', 'key'],
+                user_service_key: ['user_service_key']
+              };
+              if (!allowedModes[activeMode].includes(field.name)) {
+                return;
+              }
+            }
+
+            const input = providerFields.querySelector('[data-field-name="' + field.name + '"] input, [data-field-name="' + field.name + '"] textarea, [data-field-name="' + field.name + '"] select');
+            if (!input || input.disabled) {
+              return;
+            }
+
+            const value = collectFieldValue(input, field);
+            if (value === undefined) {
+              return;
+            }
+            payload[field.name] = value;
+          });
+        }
+
+        if (providerName === 'cloudflare') {
+          if (!payload.ttl) {
+            payload.ttl = 1;
+          }
+          if (payload.zone_identifier && payload.zone_identifier === payload.domain) {
+            throw new Error('For Cloudflare, Zone ID must be the Cloudflare Zone ID, not the domain name');
+          }
+
+          const authModeInput = document.querySelector('input[name="cloudflare_auth_mode"]:checked');
+          const authMode = authModeInput ? authModeInput.value : 'token';
+          if (authMode === 'token' && !payload.token) {
+            throw new Error('Cloudflare API token is required for the selected authentication method');
+          }
+          if (authMode === 'email_key' && (!payload.email || !payload.key)) {
+            throw new Error('Cloudflare email and global API key are both required for the selected authentication method');
+          }
+          if (authMode === 'user_service_key' && !payload.user_service_key) {
+            throw new Error('Cloudflare user service key is required for the selected authentication method');
+          }
+        }
+
+        const extraJSON = document.getElementById('extra_json').value.trim();
+        if (extraJSON) {
+          const extraObject = JSON.parse(extraJSON);
+          Object.entries(extraObject).forEach(([key, value]) => {
+            payload[key] = value;
+          });
+        }
+
+        document.getElementById('payload').value = JSON.stringify(payload);
+      } catch (error) {
+        event.preventDefault();
+        window.alert('Could not prepare configuration payload: ' + error.message);
+      }
+    });
+
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && !editorOverlay.classList.contains('is-hidden')) {
+        closeEditor();
+      }
+      if (event.key === 'Escape' && !adminOverlay.classList.contains('is-hidden')) {
+        closeAdminDialog();
+      }
+    });
+
+    periodSelect.addEventListener('change', async () => {
+      if (!adminUnlocked) {
+        return;
+      }
+      const body = new URLSearchParams();
+      body.set('period', periodSelect.value);
+      const response = await fetch(rootURL + '/api/settings/period', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: body.toString()
+      });
+      const result = await response.json();
+      window.alert(result.message || 'Interval updated');
+      window.setTimeout(() => window.location.reload(), 2500);
+    });
+
+    buildProviderOptions();
+    fillForm(providerDefaults(''), null);
+    closeEditor();
+    window.setInterval(refreshOverview, 10000);
+  </script>
+</body>
+
+</html>
