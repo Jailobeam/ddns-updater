@@ -174,7 +174,7 @@
             </details>
 
             <div class="form-actions">
-              <button class="button" type="submit" {{if or (not .Editable) (not .AdminUnlocked)}}disabled{{end}}>Save configuration</button>
+              <button class="button" type="submit" id="save-config-button" {{if or (not .Editable) (not .AdminUnlocked)}}disabled{{end}}>Save configuration</button>
               <button class="button secondary" type="button" onclick="closeEditor()">Cancel</button>
             </div>
           </form>
@@ -268,6 +268,7 @@
     const editorDialog = document.getElementById('editor-dialog');
     const editorTitle = document.getElementById('editor-title');
     const settingsForm = document.getElementById('settings-form');
+    const saveConfigButton = document.getElementById('save-config-button');
     const entryList = document.getElementById('entry-list');
     const configuredCountBadge = document.getElementById('configured-count');
     const providerCountBadge = document.getElementById('provider-count');
@@ -328,8 +329,12 @@
       wrapper.className = 'field';
       wrapper.dataset.fieldName = field.name;
 
-      if (options.authMode) {
-        wrapper.dataset.authMode = options.authMode;
+      if (options.choiceGroup) {
+        wrapper.dataset.choiceGroup = options.choiceGroup;
+      }
+
+      if (options.choiceOption) {
+        wrapper.dataset.choiceOption = options.choiceOption;
       }
 
       if (field.type === 'checkbox') {
@@ -362,8 +367,9 @@
         input.value = fieldValueToString(currentValue, field.type);
       }
 
-      if (options.placeholder) {
-        input.placeholder = options.placeholder;
+      const placeholder = options.placeholder || field.placeholder;
+      if (placeholder) {
+        input.placeholder = placeholder;
       }
 
       wrapper.appendChild(input);
@@ -377,6 +383,13 @@
       return wrapper;
     }
 
+    function noteParagraphs(text) {
+      return String(text || '')
+        .split(/\n\s*\n/)
+        .map(part => part.trim())
+        .filter(Boolean);
+    }
+
     function setProviderHelp(providerName) {
       const schema = providerSchemaMap[providerName];
       if (!schema) {
@@ -387,30 +400,60 @@
 
       providerDocLink.href = 'https://github.com/qdm12/ddns-updater/blob/master/docs/' + schema.doc;
 
-      if (providerName === 'cloudflare') {
-        providerNote.innerHTML = '<strong>Cloudflare setup</strong><p>Use exactly one authentication method. Best choice: API token with DNS edit permission. <code>Zone ID</code> is not your domain name.</p>';
-        return;
+      const title = escapeHTML(schema.noteTitle || schema.title);
+      const paragraphs = [];
+
+      noteParagraphs(schema.noteBody).forEach(paragraph => {
+        paragraphs.push('<p>' + escapeHTML(paragraph) + '</p>');
+      });
+
+      if (!paragraphs.length && schema.choiceGroups && schema.choiceGroups.length) {
+        paragraphs.push('<p>Choose the required fields below.</p>');
       }
 
-      providerNote.innerHTML = '<strong>' + schema.title + '</strong><p>Provider-specific fields come from the upstream documentation. Use Additional JSON only for advanced options not shown here.</p>';
+      if (!paragraphs.length) {
+        paragraphs.push('<p>Use the provider-specific fields below. Additional JSON is only for advanced options.</p>');
+      }
+
+      providerNote.innerHTML = '<strong>' + title + '</strong>' + paragraphs.join('');
     }
 
-    function detectCloudflareAuthMode(values) {
-      if (values.user_service_key) {
-        return 'user_service_key';
+    function hasConfiguredValue(value) {
+      if (value === undefined || value === null) {
+        return false;
       }
-      if (values.email || values.key) {
-        return 'email_key';
+      if (typeof value === 'string') {
+        return value.trim() !== '';
       }
-      return 'token';
+      if (typeof value === 'boolean') {
+        return value;
+      }
+      if (typeof value === 'number') {
+        return true;
+      }
+      if (Array.isArray(value)) {
+        return value.length > 0;
+      }
+      if (typeof value === 'object') {
+        return Object.keys(value).length > 0;
+      }
+      return true;
     }
 
-    function updateCloudflareAuthVisibility() {
-      const authModeInput = document.querySelector('input[name="cloudflare_auth_mode"]:checked');
-      const activeMode = authModeInput ? authModeInput.value : 'token';
+    function detectChoiceGroupValue(group, values) {
+      for (const option of group.options || []) {
+        if ((option.fields || []).some(fieldName => hasConfiguredValue(values[fieldName]))) {
+          return option.value;
+        }
+      }
+      return group.options && group.options.length ? group.options[0].value : '';
+    }
 
-      providerFields.querySelectorAll('[data-auth-mode]').forEach(element => {
-        const visible = element.dataset.authMode === activeMode;
+    function updateChoiceGroupVisibility(groupName) {
+      const selectedInput = providerFields.querySelector('input[name="' + groupName + '"]:checked');
+      const selectedValue = selectedInput ? selectedInput.value : '';
+      providerFields.querySelectorAll('[data-choice-group="' + groupName + '"]').forEach(element => {
+        const visible = element.dataset.choiceOption === selectedValue;
         element.classList.toggle('is-hidden', !visible);
         element.querySelectorAll('input, textarea, select').forEach(input => {
           input.disabled = !visible;
@@ -418,128 +461,79 @@
       });
     }
 
-    function renderCloudflareFields(schema, values) {
+    function renderChoiceGroup(schema, group, values) {
+      const groupedFields = schema.fields.filter(field => field.choiceGroup === group.name);
+      if (!groupedFields.length) {
+        return;
+      }
+
+      if (!group.options || group.options.length <= 1) {
+        const singleGrid = document.createElement('div');
+        singleGrid.className = 'field-grid';
+        groupedFields.forEach(field => {
+          singleGrid.appendChild(createField(field, values[field.name], {
+            forceRequired: true
+          }));
+        });
+        providerFields.appendChild(singleGrid);
+        return;
+      }
+
       const wrapper = document.createElement('div');
       wrapper.className = 'provider-stack';
 
-      const authModes = document.createElement('fieldset');
-      authModes.className = 'choice-group';
+      const fieldset = document.createElement('fieldset');
+      fieldset.className = 'choice-group';
 
       const legend = document.createElement('legend');
-      legend.textContent = 'Cloudflare authentication';
-      authModes.appendChild(legend);
+      legend.textContent = group.label || 'Choose one option';
+      fieldset.appendChild(legend);
 
-      const choiceHelp = document.createElement('p');
-      choiceHelp.className = 'choice-help';
-      choiceHelp.textContent = 'Choose exactly one method. If you already have an API token, use that.';
-      authModes.appendChild(choiceHelp);
+      if (group.help) {
+        const choiceHelp = document.createElement('p');
+        choiceHelp.className = 'choice-help';
+        choiceHelp.textContent = group.help;
+        fieldset.appendChild(choiceHelp);
+      }
 
       const choices = document.createElement('div');
       choices.className = 'choice-grid';
-      const activeMode = detectCloudflareAuthMode(values);
-      const items = [
-        {
-          value: 'token',
-          title: 'API token',
-          body: 'Recommended. Needs DNS edit permission.'
-        },
-        {
-          value: 'email_key',
-          title: 'Email + global API key',
-          body: 'Use this only with Cloudflare\'s global API key.'
-        },
-        {
-          value: 'user_service_key',
-          title: 'User service key',
-          body: 'Alternative method for some setups.'
-        }
-      ];
+      const activeValue = detectChoiceGroupValue(group, values);
 
-      items.forEach(item => {
-        const option = document.createElement('label');
-        option.className = 'choice-card';
+      group.options.forEach(option => {
+        const choice = document.createElement('label');
+        choice.className = 'choice-card';
 
         const radio = document.createElement('input');
         radio.type = 'radio';
-        radio.name = 'cloudflare_auth_mode';
-        radio.value = item.value;
-        radio.checked = item.value === activeMode;
-        radio.addEventListener('change', updateCloudflareAuthVisibility);
-        option.appendChild(radio);
+        radio.name = group.name;
+        radio.value = option.value;
+        radio.checked = option.value === activeValue;
+        radio.addEventListener('change', () => updateChoiceGroupVisibility(group.name));
+        choice.appendChild(radio);
 
         const content = document.createElement('div');
-        content.innerHTML = '<strong>' + item.title + '</strong><small>' + item.body + '</small>';
-        option.appendChild(content);
-
-        choices.appendChild(option);
+        content.innerHTML = '<strong>' + escapeHTML(option.title) + '</strong><small>' + escapeHTML(option.description) + '</small>';
+        choice.appendChild(content);
+        choices.appendChild(choice);
       });
 
-      authModes.appendChild(choices);
-      wrapper.appendChild(authModes);
+      fieldset.appendChild(choices);
+      wrapper.appendChild(fieldset);
 
-      const generalGrid = document.createElement('div');
-      generalGrid.className = 'field-grid';
-
-      const zoneField = getSchemaField(schema, 'zone_identifier');
-      if (zoneField) {
-        generalGrid.appendChild(createField(zoneField, values.zone_identifier, {
-          placeholder: 'Cloudflare Zone ID'
+      const fieldGrid = document.createElement('div');
+      fieldGrid.className = 'field-grid';
+      groupedFields.forEach(field => {
+        fieldGrid.appendChild(createField(field, values[field.name], {
+          choiceGroup: group.name,
+          choiceOption: field.choiceOption,
+          forceRequired: field.choiceOption === activeValue
         }));
-      }
+      });
 
-      const ttlField = getSchemaField(schema, 'ttl');
-      if (ttlField) {
-        const ttlValue = values.ttl === undefined ? 1 : values.ttl;
-        generalGrid.appendChild(createField(ttlField, ttlValue, {
-          placeholder: '1 for automatic'
-        }));
-      }
-
-      const proxiedField = getSchemaField(schema, 'proxied');
-      if (proxiedField) {
-        generalGrid.appendChild(createField(proxiedField, values.proxied));
-      }
-
-      wrapper.appendChild(generalGrid);
-
-      const authGrid = document.createElement('div');
-      authGrid.className = 'field-grid';
-
-      const tokenField = getSchemaField(schema, 'token');
-      if (tokenField) {
-        authGrid.appendChild(createField(tokenField, values.token, {
-          authMode: 'token',
-          forceRequired: activeMode === 'token'
-        }));
-      }
-
-      const emailField = getSchemaField(schema, 'email');
-      if (emailField) {
-        authGrid.appendChild(createField(emailField, values.email, {
-          authMode: 'email_key',
-          forceRequired: activeMode === 'email_key'
-        }));
-      }
-
-      const keyField = getSchemaField(schema, 'key');
-      if (keyField) {
-        authGrid.appendChild(createField(keyField, values.key, {
-          authMode: 'email_key',
-          forceRequired: activeMode === 'email_key'
-        }));
-      }
-
-      const userServiceKeyField = getSchemaField(schema, 'user_service_key');
-      if (userServiceKeyField) {
-        authGrid.appendChild(createField(userServiceKeyField, values.user_service_key, {
-          authMode: 'user_service_key',
-          forceRequired: activeMode === 'user_service_key'
-        }));
-      }
-
-      wrapper.appendChild(authGrid);
+      wrapper.appendChild(fieldGrid);
       providerFields.appendChild(wrapper);
-      updateCloudflareAuthVisibility();
+      updateChoiceGroupVisibility(group.name);
     }
 
     function renderProviderFields(providerName, values) {
@@ -552,21 +546,22 @@
 
       setProviderHelp(providerName);
 
-      if (providerName === 'cloudflare') {
-        renderCloudflareFields(schema, values);
-        return;
-      }
-
       const fieldGrid = document.createElement('div');
       fieldGrid.className = 'field-grid';
 
       schema.fields
-        .filter(field => !field.common)
+        .filter(field => !field.common && !field.choiceGroup)
         .forEach(field => {
           fieldGrid.appendChild(createField(field, values[field.name]));
         });
 
-      providerFields.appendChild(fieldGrid);
+      if (fieldGrid.childElementCount > 0) {
+        providerFields.appendChild(fieldGrid);
+      }
+
+      (schema.choiceGroups || []).forEach(group => {
+        renderChoiceGroup(schema, group, values);
+      });
     }
 
     function readKnownFieldNames(providerName) {
@@ -790,6 +785,7 @@
       changePasswordButton.classList.toggle('is-hidden', !adminUnlocked);
       newEntryButton.classList.toggle('is-hidden', !adminUnlocked);
       changePasswordButton.disabled = !adminUnlocked;
+      saveConfigButton.disabled = !adminUnlocked;
       defaultPasswordBadge.classList.toggle('is-hidden', !passwordIsDefault);
       renderEntries(state.configEntries || []);
     }
@@ -964,51 +960,63 @@
         }
 
         if (schema) {
+          const selectedChoiceOptions = {};
+          (schema.choiceGroups || []).forEach(group => {
+            const selectedInput = providerFields.querySelector('input[name="' + group.name + '"]:checked');
+            selectedChoiceOptions[group.name] = selectedInput
+              ? selectedInput.value
+              : (group.options && group.options.length ? group.options[0].value : '');
+          });
+
           schema.fields.filter(field => !field.common).forEach(field => {
-            if (providerName === 'cloudflare' && ['token', 'email', 'key', 'user_service_key'].includes(field.name)) {
-              const activeModeInput = document.querySelector('input[name="cloudflare_auth_mode"]:checked');
-              const activeMode = activeModeInput ? activeModeInput.value : 'token';
-              const allowedModes = {
-                token: ['token'],
-                email_key: ['email', 'key'],
-                user_service_key: ['user_service_key']
-              };
-              if (!allowedModes[activeMode].includes(field.name)) {
-                return;
-              }
+            if (field.choiceGroup && selectedChoiceOptions[field.choiceGroup] !== field.choiceOption) {
+              return;
             }
 
             const input = providerFields.querySelector('[data-field-name="' + field.name + '"] input, [data-field-name="' + field.name + '"] textarea, [data-field-name="' + field.name + '"] select');
             if (!input || input.disabled) {
+              if (field.required) {
+                throw new Error(field.label + ' is required');
+              }
               return;
             }
 
             const value = collectFieldValue(input, field);
             if (value === undefined) {
+              if (field.required) {
+                throw new Error(field.label + ' is required');
+              }
               return;
             }
             payload[field.name] = value;
           });
+
+          (schema.choiceGroups || []).forEach(group => {
+            const selectedValue = selectedChoiceOptions[group.name];
+            const selectedOption = (group.options || []).find(option => option.value === selectedValue);
+            if (!selectedOption) {
+              return;
+            }
+
+            const missingFields = (selectedOption.fields || []).filter(fieldName => !hasConfiguredValue(payload[fieldName]));
+            if (missingFields.length > 0) {
+              const missingLabels = missingFields.map(fieldName => {
+                const field = getSchemaField(schema, fieldName);
+                return field ? field.label : fieldName;
+              });
+              throw new Error(selectedOption.title + ' requires ' + missingLabels.join(' and '));
+            }
+          });
         }
 
-        if (providerName === 'cloudflare') {
-          if (!payload.ttl) {
-            payload.ttl = 1;
-          }
-          if (payload.zone_identifier && payload.zone_identifier === payload.domain) {
-            throw new Error('For Cloudflare, Zone ID must be the Cloudflare Zone ID, not the domain name');
-          }
+        if (providerName === 'cloudflare' && !payload.ttl) {
+          payload.ttl = 1;
+        }
 
-          const authModeInput = document.querySelector('input[name="cloudflare_auth_mode"]:checked');
-          const authMode = authModeInput ? authModeInput.value : 'token';
-          if (authMode === 'token' && !payload.token) {
-            throw new Error('Cloudflare API token is required for the selected authentication method');
-          }
-          if (authMode === 'email_key' && (!payload.email || !payload.key)) {
-            throw new Error('Cloudflare email and global API key are both required for the selected authentication method');
-          }
-          if (authMode === 'user_service_key' && !payload.user_service_key) {
-            throw new Error('Cloudflare user service key is required for the selected authentication method');
+        if (payload.zone_identifier && payload.zone_identifier === payload.domain) {
+          const zoneField = schema ? getSchemaField(schema, 'zone_identifier') : null;
+          if (zoneField) {
+            throw new Error(zoneField.label + ' must not be the domain name');
           }
         }
 

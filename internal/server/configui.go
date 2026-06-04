@@ -15,27 +15,47 @@ import (
 	"strings"
 	"time"
 
-	"github.com/qdm12/ddns-updater/internal/constants"
 	providersdocs "github.com/qdm12/ddns-updater/docs"
+	"github.com/qdm12/ddns-updater/internal/constants"
 	jsonparams "github.com/qdm12/ddns-updater/internal/params"
 	"github.com/qdm12/ddns-updater/internal/records"
 )
 
 type providerField struct {
-	Name        string `json:"name"`
-	Label       string `json:"label"`
-	Type        string `json:"type"`
-	Description string `json:"description"`
-	Required    bool   `json:"required"`
-	Secret      bool   `json:"secret"`
-	Common      bool   `json:"common"`
+	Name         string `json:"name"`
+	Label        string `json:"label"`
+	Type         string `json:"type"`
+	Description  string `json:"description"`
+	Required     bool   `json:"required"`
+	Secret       bool   `json:"secret"`
+	Common       bool   `json:"common"`
+	ChoiceGroup  string `json:"choiceGroup,omitempty"`
+	ChoiceOption string `json:"choiceOption,omitempty"`
+	Placeholder  string `json:"placeholder,omitempty"`
+}
+
+type providerChoiceOption struct {
+	Value       string   `json:"value"`
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	Fields      []string `json:"fields"`
+}
+
+type providerChoiceGroup struct {
+	Name    string                 `json:"name"`
+	Label   string                 `json:"label"`
+	Help    string                 `json:"help"`
+	Options []providerChoiceOption `json:"options"`
 }
 
 type providerSchema struct {
-	Name   string          `json:"name"`
-	Title  string          `json:"title"`
-	Doc    string          `json:"doc"`
-	Fields []providerField `json:"fields"`
+	Name         string                `json:"name"`
+	Title        string                `json:"title"`
+	Doc          string                `json:"doc"`
+	NoteTitle    string                `json:"noteTitle,omitempty"`
+	NoteBody     string                `json:"noteBody,omitempty"`
+	Fields       []providerField       `json:"fields"`
+	ChoiceGroups []providerChoiceGroup `json:"choiceGroups,omitempty"`
 }
 
 type rawConfig struct {
@@ -43,16 +63,16 @@ type rawConfig struct {
 }
 
 type configEntry struct {
-	Index     int
-	Provider  string
-	Domain    string
-	Owner     string
-	IPVersion string
-	Summary   string
-	Disabled  bool
-	Status    string
-	StatusTone string
-	CurrentIP string
+	Index       int
+	Provider    string
+	Domain      string
+	Owner       string
+	IPVersion   string
+	Summary     string
+	Disabled    bool
+	Status      string
+	StatusTone  string
+	CurrentIP   string
 	PreviousIPs string
 }
 
@@ -67,29 +87,31 @@ type recordsHTMLRow struct {
 }
 
 type pageData struct {
-	Rows             []recordsHTMLRow
-	ConfigEntries    []configEntry
-	ConfigJSONB64    string
-	SchemasJSONB64   string
-	RootURL          string
-	Message          string
-	Error            string
-	Editable         bool
-	AdminUnlocked    bool
+	Rows              []recordsHTMLRow
+	ConfigEntries     []configEntry
+	ConfigJSONB64     string
+	SchemasJSONB64    string
+	RootURL           string
+	Message           string
+	Error             string
+	Editable          bool
+	AdminUnlocked     bool
 	PasswordIsDefault bool
-	DisabledReason   string
-	StatusTableEmpty bool
-	ProviderCount    int
-	ConfiguredCount  int
-	CurrentPeriod    string
+	DisabledReason    string
+	StatusTableEmpty  bool
+	ProviderCount     int
+	ConfiguredCount   int
+	CurrentPeriod     string
 }
 
 var (
-	jsonBlockRegex = regexp.MustCompile("(?s)```json\\s*(.*?)```")
-	titleRegex     = regexp.MustCompile(`(?m)^#\s+(.+)$`)
-	quotedRegex    = regexp.MustCompile(`"([^"]+)"`)
-	trailingComma  = regexp.MustCompile(`,(\s*[}\]])`)
-	htmlTagRegex   = regexp.MustCompile(`<[^>]*>`)
+	jsonBlockRegex       = regexp.MustCompile("(?s)```json\\s*(.*?)```")
+	titleRegex           = regexp.MustCompile(`(?m)^#\s+(.+)$`)
+	codeQuotedFieldRegex = regexp.MustCompile("`\"([^\"]+)\"`")
+	trailingComma        = regexp.MustCompile(`,(\s*[}\]])`)
+	htmlTagRegex         = regexp.MustCompile(`<[^>]*>`)
+	markdownLinkRegex    = regexp.MustCompile(`\[(.*?)\]\((.*?)\)`)
+	multiSpaceRegex      = regexp.MustCompile(`\s+`)
 )
 
 func loadProviderSchemas() (schemas map[string]providerSchema, err error) {
@@ -126,6 +148,7 @@ func schemaFromDoc(name string) (schema providerSchema, err error) {
 		schema.Title = strings.TrimSuffix(name, ".md")
 	}
 	schema.Doc = name
+	schema.NoteTitle, schema.NoteBody = parseProviderNote(schema.Title, content)
 
 	exampleMatch := jsonBlockRegex.FindStringSubmatch(content)
 	if len(exampleMatch) < 2 {
@@ -150,8 +173,9 @@ func schemaFromDoc(name string) (schema providerSchema, err error) {
 		return schema, errors.New("provider field not found in example")
 	}
 	schema.Name = providerName
+	schema.NoteTitle, schema.NoteBody = normalizeProviderNote(schema.Name, schema.Title, schema.NoteBody)
 
-	requiredDescriptions, optionalDescriptions := parseFieldDescriptions(content)
+	requiredDescriptions, optionalDescriptions, choiceGroups, choiceFields := parseFieldDescriptions(content)
 
 	orderedFieldNames := make([]string, 0, len(firstSetting)+len(requiredDescriptions)+len(optionalDescriptions))
 	appendField := func(fieldName string) {
@@ -183,17 +207,25 @@ func schemaFromDoc(name string) (schema providerSchema, err error) {
 		if !required {
 			description = optionalDescriptions[fieldName]
 		}
+		if required && descriptionSuggestsOptional(description) {
+			required = false
+		}
+		normalizedDescription := normalizeFieldDescription(fieldName, description)
 		fields = append(fields, providerField{
-			Name:        fieldName,
-			Label:       humanizeFieldName(fieldName),
-			Type:        inferFieldType(fieldName, description, exampleValue, hasExample),
-			Description: description,
-			Required:    required,
-			Secret:      isSecretField(fieldName),
-			Common:      isCommonField(fieldName),
+			Name:         fieldName,
+			Label:        humanizeFieldName(fieldName),
+			Type:         inferFieldType(fieldName, description, exampleValue, hasExample),
+			Description:  normalizedDescription,
+			Required:     required,
+			Secret:       isSecretField(fieldName),
+			Common:       isCommonField(fieldName),
+			ChoiceGroup:  choiceFields[fieldName].groupName,
+			ChoiceOption: choiceFields[fieldName].optionValue,
+			Placeholder:  inferFieldPlaceholder(fieldName, description),
 		})
 	}
 	schema.Fields = fields
+	schema.ChoiceGroups = normalizeChoiceGroups(choiceGroups)
 	return schema, nil
 }
 
@@ -210,11 +242,21 @@ func sanitizeJSONExample(example string) string {
 	return trailingComma.ReplaceAllString(sanitized, "$1")
 }
 
-func parseFieldDescriptions(content string) (required, optional map[string]string) {
+type choiceFieldRef struct {
+	groupName   string
+	optionValue string
+}
+
+func parseFieldDescriptions(content string) (required, optional map[string]string, choiceGroups []providerChoiceGroup,
+	choiceFields map[string]choiceFieldRef) {
 	required = make(map[string]string)
 	optional = make(map[string]string)
+	choiceFields = make(map[string]choiceFieldRef)
 	target := ""
-	inAlternativeGroup := false
+	var activeGroup *providerChoiceGroup
+	var headingGroup *providerChoiceGroup
+	activeHeadingOption := ""
+	groupCounter := 0
 
 	for _, line := range strings.Split(content, "\n") {
 		indentation := len(line) - len(strings.TrimLeft(line, " \t"))
@@ -222,28 +264,69 @@ func parseFieldDescriptions(content string) (required, optional map[string]strin
 		switch trimmed {
 		case "### Compulsory parameters":
 			target = "required"
-			inAlternativeGroup = false
+			activeGroup = nil
+			headingGroup = nil
+			activeHeadingOption = ""
 			continue
 		case "### Optional parameters":
 			target = "optional"
-			inAlternativeGroup = false
+			activeGroup = nil
+			headingGroup = nil
+			activeHeadingOption = ""
 			continue
 		}
 
 		if target == "required" && strings.HasPrefix(trimmed, "- One of the following") {
-			inAlternativeGroup = true
+			groupCounter++
+			groupName := fmt.Sprintf("choice_group_%d", groupCounter)
+			help := sanitizeGuideText(strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "- "), ":")))
+			label := inferChoiceGroupLabel(help)
+			choiceGroups = append(choiceGroups, providerChoiceGroup{
+				Name:  groupName,
+				Label: label,
+				Help:  help,
+			})
+			activeGroup = &choiceGroups[len(choiceGroups)-1]
+			headingGroup = nil
+			activeHeadingOption = ""
 			continue
 		}
 
-		if inAlternativeGroup && (indentation == 0 || !strings.HasPrefix(trimmed, "- ")) {
-			inAlternativeGroup = false
+		if target == "required" && strings.HasPrefix(trimmed, "#### ") {
+			activeGroup = nil
+			if headingGroup == nil {
+				groupCounter++
+				groupName := fmt.Sprintf("choice_group_%d", groupCounter)
+				choiceGroups = append(choiceGroups, providerChoiceGroup{
+					Name:  groupName,
+					Label: "Mode",
+					Help:  "Choose the setup mode for this provider.",
+				})
+				headingGroup = &choiceGroups[len(choiceGroups)-1]
+			}
+			optionTitle := normalizeHeadingChoiceTitle(strings.TrimSpace(strings.TrimPrefix(trimmed, "#### ")))
+			optionValue := slugChoiceValue(optionTitle)
+			if !choiceGroupHasOption(*headingGroup, optionValue) {
+				headingGroup.Options = append(headingGroup.Options, providerChoiceOption{
+					Value:       optionValue,
+					Title:       optionTitle,
+					Description: optionTitle,
+					Fields:      []string{},
+				})
+			}
+			activeHeadingOption = optionValue
+			continue
+		}
+
+		if activeGroup != nil && (indentation == 0 || !strings.HasPrefix(trimmed, "- ")) {
+			activeGroup = nil
 		}
 
 		if !strings.HasPrefix(trimmed, "- ") || target == "" {
 			continue
 		}
 
-		matches := quotedRegex.FindAllStringSubmatch(trimmed, -1)
+		matches := codeQuotedFieldRegex.FindAllStringSubmatch(trimmed, -1)
 		if len(matches) == 0 {
 			continue
 		}
@@ -251,11 +334,54 @@ func parseFieldDescriptions(content string) (required, optional map[string]strin
 		description := strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))
 		for _, match := range matches {
 			fieldName := strings.TrimSpace(match[1])
+			if !isLikelyFieldName(fieldName) {
+				continue
+			}
 			switch target {
 			case "required":
-				if inAlternativeGroup && indentation > 0 {
+				if headingGroup != nil && activeHeadingOption != "" {
+					if _, exists := optional[fieldName]; !exists {
+						optional[fieldName] = description
+					}
+					if !descriptionSuggestsOptional(description) {
+						for optionIndex := range headingGroup.Options {
+							if headingGroup.Options[optionIndex].Value != activeHeadingOption {
+								continue
+							}
+							if !slices.Contains(headingGroup.Options[optionIndex].Fields, fieldName) {
+								headingGroup.Options[optionIndex].Fields = append(headingGroup.Options[optionIndex].Fields, fieldName)
+							}
+							break
+						}
+					}
+					choiceFields[fieldName] = choiceFieldRef{
+						groupName:   headingGroup.Name,
+						optionValue: activeHeadingOption,
+					}
+					continue
+				}
+
+				if activeGroup != nil && indentation > 0 {
 					if _, exists := optional[fieldName]; !exists {
 						optional[fieldName] = "One of the following: " + description
+					}
+					optionFields := quotedFieldNames(description)
+					if descriptionSuggestsOptional(description) {
+						optionFields = nil
+					}
+					optionValue := buildChoiceOptionValue(optionFields)
+					title := buildChoiceOptionTitle(description, optionFields)
+					if !choiceGroupHasOption(*activeGroup, optionValue) {
+						activeGroup.Options = append(activeGroup.Options, providerChoiceOption{
+							Value:       optionValue,
+							Title:       title,
+							Description: sanitizeGuideText(description),
+							Fields:      optionFields,
+						})
+					}
+					choiceFields[fieldName] = choiceFieldRef{
+						groupName:   activeGroup.Name,
+						optionValue: optionValue,
 					}
 					continue
 				}
@@ -269,7 +395,83 @@ func parseFieldDescriptions(content string) (required, optional map[string]strin
 			}
 		}
 	}
-	return required, optional
+	return required, optional, choiceGroups, choiceFields
+}
+
+func parseProviderNote(title, content string) (noteTitle, noteBody string) {
+	parts := strings.Split(content, "## Configuration")
+	if len(parts) == 0 {
+		return "", ""
+	}
+	intro := strings.TrimSpace(parts[0])
+	lines := strings.Split(intro, "\n")
+	filtered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			filtered = append(filtered, "")
+			continue
+		}
+		if strings.HasPrefix(trimmed, "# ") {
+			continue
+		}
+		filtered = append(filtered, sanitizeGuideText(trimmed))
+	}
+	noteBody = strings.TrimSpace(strings.Join(filtered, "\n"))
+	noteBody = strings.ReplaceAll(noteBody, "\n\n\n", "\n\n")
+	if noteBody == "" {
+		return "", ""
+	}
+	return title, noteBody
+}
+
+func normalizeProviderNote(providerName, title, body string) (noteTitle, noteBody string) {
+	if providerName == "" {
+		return title, compactNoteBody(body)
+	}
+
+	if note, ok := map[string]string{
+		"cloudflare":   "Use the zone ID from Cloudflare and choose one authentication method below.",
+		"custom":       "Use your own update URL. The updater appends the detected IP automatically.",
+		"digitalocean": "Use a personal access token with DNS access for the target domain.",
+		"gcp":          "Use your Google Cloud project, zone, and full JSON service account credentials.",
+		"hetzner":      "Legacy provider. Prefer Hetzner Cloud for new setups when possible.",
+		"hetznercloud": "Uses the Hetzner Cloud DNS API, not the legacy Hetzner DNS API.",
+		"ionos":        "Use your IONOS API key in <prefix>.<key> format for Dynamic DNS.",
+		"porkbun":      "Requires an API key, a secret API key, and API access enabled for the domain.",
+	}[providerName]; ok {
+		return title, note
+	}
+
+	return title, compactNoteBody(body)
+}
+
+func compactNoteBody(body string) string {
+	body = sanitizeGuideText(body)
+	if body == "" {
+		return ""
+	}
+
+	if strings.Contains(body, "\n\n") {
+		body = strings.TrimSpace(strings.Split(body, "\n\n")[0])
+	}
+
+	if len(body) > 180 {
+		if dot := strings.Index(body[:180], ". "); dot > 0 {
+			body = body[:dot+1]
+		} else {
+			body = body[:177] + "..."
+		}
+	}
+	return strings.TrimSpace(body)
+}
+
+func descriptionSuggestsOptional(description string) bool {
+	lower := strings.ToLower(sanitizeGuideText(description))
+	return strings.HasPrefix(lower, "optional ") ||
+		strings.Contains(lower, " optional ") ||
+		strings.Contains(lower, "defaults to") ||
+		strings.Contains(lower, "if left empty")
 }
 
 func sortedDescriptionKeys(m map[string]string) []string {
@@ -312,6 +514,97 @@ func inferFieldType(fieldName, description string, exampleValue any, hasExample 
 	}
 }
 
+func inferFieldPlaceholder(fieldName, description string) string {
+	lowerDescription := strings.ToLower(description)
+	switch fieldName {
+	case "zone_identifier":
+		return "Zone ID"
+	case "url":
+		return "https://example.com/update"
+	case "ipv4key":
+		return "ipv4"
+	case "ipv6key":
+		return "ipv6"
+	case "ttl":
+		if strings.Contains(lowerDescription, "automatic") {
+			return "1 for automatic"
+		}
+	}
+
+	if strings.Contains(lowerDescription, "json credentials") {
+		return "{\n  \"type\": \"service_account\"\n}"
+	}
+	return ""
+}
+
+func normalizeFieldDescription(fieldName, description string) string {
+	description = sanitizeGuideText(description)
+	if description == "" {
+		return ""
+	}
+
+	if short, ok := map[string]string{
+		"domain":           "Full hostname to update, for example home.example.com.",
+		"ip_version":       "Choose whether to update IPv4, IPv6, or whichever public IP is available.",
+		"ipv6_suffix":      "Optional stable IPv6 suffix. Leave empty to use the detected IPv6 address directly.",
+		"zone_identifier":  "The provider zone ID. This is usually not the domain name.",
+		"ttl":              "DNS record time to live in seconds. Use 1 when the provider supports automatic TTL.",
+		"token":            "API token with permission to update DNS records.",
+		"email":            "Account email used together with the global API key.",
+		"key":              "Global API key used together with the account email.",
+		"user_service_key": "User service key for providers that support it.",
+		"credentials":      "Paste the full JSON credentials for this provider or service account.",
+		"project":          "Project identifier used by the provider account.",
+		"zone":             "DNS zone name or zone identifier used by the provider.",
+		"url":              "Update URL without the IP value. The updater will append the IP for you.",
+		"ipv4key":          "Query parameter name that should receive the IPv4 address.",
+		"ipv6key":          "Query parameter name that should receive the IPv6 address.",
+		"success_regex":    "Regular expression that marks a successful provider response.",
+		"proxied":          "Enable provider proxying for this record when supported.",
+	}[fieldName]; ok {
+		return short
+	}
+
+	description = codeQuotedFieldRegex.ReplaceAllString(description, "")
+	description = strings.TrimSpace(strings.TrimPrefix(description, "One of the following:"))
+	description = strings.ReplaceAll(description, " For example:", ". Example:")
+
+	prefixes := []string{
+		"is the ",
+		"is your ",
+		"is a ",
+		"is an ",
+		"can be ",
+	}
+
+	for _, prefix := range prefixes {
+		marker := humanizeFieldName(fieldName) + " " + prefix
+		if strings.HasPrefix(strings.ToLower(description), strings.ToLower(marker)) {
+			description = strings.TrimSpace(description[len(marker):])
+			break
+		}
+	}
+
+	if len(description) > 180 {
+		if dot := strings.Index(description[:180], ". "); dot > 0 {
+			description = description[:dot+1]
+		} else {
+			description = description[:177] + "..."
+		}
+	}
+
+	if description == "" {
+		return ""
+	}
+
+	description = strings.TrimSpace(strings.Trim(description, "-:"))
+	description = strings.ToUpper(description[:1]) + description[1:]
+	if !strings.HasSuffix(description, ".") {
+		description += "."
+	}
+	return description
+}
+
 func isSecretField(fieldName string) bool {
 	lower := strings.ToLower(fieldName)
 	for _, token := range []string{"password", "token", "secret", "key", "credentials"} {
@@ -332,6 +625,29 @@ func isCommonField(fieldName string) bool {
 }
 
 func humanizeFieldName(fieldName string) string {
+	if label, ok := map[string]string{
+		"zone_identifier":  "Zone ID",
+		"user_service_key": "User service key",
+		"ip_version":       "IP version",
+		"ipv6_suffix":      "IPv6 suffix",
+		"ipv4key":          "IPv4 query key",
+		"ipv6key":          "IPv6 query key",
+		"success_regex":    "Success regex",
+	}[fieldName]; ok {
+		return label
+	}
+
+	acronyms := map[string]string{
+		"api":  "API",
+		"dns":  "DNS",
+		"gcp":  "GCP",
+		"id":   "ID",
+		"ip":   "IP",
+		"ttl":  "TTL",
+		"url":  "URL",
+		"ipv4": "IPv4",
+		"ipv6": "IPv6",
+	}
 	parts := strings.FieldsFunc(fieldName, func(r rune) bool {
 		return r == '_' || r == '.'
 	})
@@ -339,9 +655,207 @@ func humanizeFieldName(fieldName string) string {
 		if part == "" {
 			continue
 		}
+		lower := strings.ToLower(part)
+		if acronym, ok := acronyms[lower]; ok {
+			parts[i] = acronym
+			continue
+		}
 		parts[i] = strings.ToUpper(part[:1]) + strings.ToLower(part[1:])
 	}
 	return strings.Join(parts, " ")
+}
+
+func sanitizeGuideText(text string) string {
+	text = markdownLinkRegex.ReplaceAllString(text, "$1")
+	text = strings.ReplaceAll(text, "`", "")
+	text = multiSpaceRegex.ReplaceAllString(text, " ")
+	return strings.TrimSpace(text)
+}
+
+func quotedFieldNames(text string) []string {
+	matches := codeQuotedFieldRegex.FindAllStringSubmatch(text, -1)
+	fields := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		fieldName := strings.TrimSpace(match[1])
+		if !isLikelyFieldName(fieldName) || slices.Contains(fields, fieldName) {
+			continue
+		}
+		fields = append(fields, fieldName)
+	}
+	return fields
+}
+
+func buildChoiceOptionValue(fieldNames []string) string {
+	if len(fieldNames) == 0 {
+		return "option"
+	}
+	return strings.Join(fieldNames, "__")
+}
+
+func buildChoiceOptionTitle(description string, fieldNames []string) string {
+	title := codeQuotedFieldRegex.ReplaceAllString(description, "")
+	title = strings.ReplaceAll(title, " ,", ",")
+	title = strings.ReplaceAll(title, "  ", " ")
+	title = strings.TrimSpace(strings.Trim(title, "-:"))
+	title = sanitizeGuideText(title)
+	if title != "" {
+		return title
+	}
+	labels := make([]string, 0, len(fieldNames))
+	for _, fieldName := range fieldNames {
+		labels = append(labels, humanizeFieldName(fieldName))
+	}
+	return strings.Join(labels, " + ")
+}
+
+func normalizeChoiceGroups(groups []providerChoiceGroup) []providerChoiceGroup {
+	for i := range groups {
+		authGroup := isAuthenticationChoiceGroup(groups[i].Label, groups[i].Help)
+		if authGroup {
+			groups[i].Label = "Authentication"
+			if len(groups[i].Options) > 1 {
+				groups[i].Help = "Choose exactly one authentication method."
+			} else {
+				groups[i].Help = "Authentication is required for this provider."
+			}
+		} else if groups[i].Help == "" {
+			groups[i].Help = "Choose one option."
+		}
+
+		for j := range groups[i].Options {
+			option := &groups[i].Options[j]
+			option.Title = normalizeChoiceOptionTitle(option.Title, option.Fields, authGroup)
+			option.Description = normalizeChoiceOptionDescription(option.Description, option.Fields, authGroup)
+		}
+	}
+	return groups
+}
+
+func normalizeChoiceOptionTitle(title string, fieldNames []string, authGroup bool) string {
+	if authGroup {
+		switch {
+		case slices.Equal(fieldNames, []string{"token"}):
+			return "API token"
+		case slices.Equal(fieldNames, []string{"email", "key"}):
+			return "Email + global API key"
+		case slices.Equal(fieldNames, []string{"user_service_key"}):
+			return "User service key"
+		}
+	}
+
+	if title != "" {
+		return title
+	}
+
+	labels := make([]string, 0, len(fieldNames))
+	for _, fieldName := range fieldNames {
+		labels = append(labels, humanizeFieldName(fieldName))
+	}
+	return strings.Join(labels, " + ")
+}
+
+func normalizeChoiceOptionDescription(description string, fieldNames []string, authGroup bool) string {
+	if authGroup {
+		switch {
+		case slices.Equal(fieldNames, []string{"token"}):
+			return "Use a provider API token."
+		case slices.Equal(fieldNames, []string{"email", "key"}):
+			return "Use account email together with the global API key."
+		case slices.Equal(fieldNames, []string{"user_service_key"}):
+			return "Use the provider user service key."
+		}
+	}
+
+	description = sanitizeGuideText(description)
+	description = codeQuotedFieldRegex.ReplaceAllString(description, "")
+	description = strings.ReplaceAll(description, " ,", ",")
+	description = strings.TrimSpace(strings.Trim(description, "-:"))
+	if description == "" {
+		return "Choose this option for the matching fields."
+	}
+	return description
+}
+
+func normalizeHeadingChoiceTitle(title string) string {
+	title = sanitizeGuideText(title)
+	title = strings.TrimPrefix(title, "OR ")
+	title = strings.TrimPrefix(title, "Or ")
+	title = strings.TrimSpace(title)
+	if strings.HasPrefix(strings.ToLower(title), "using ") {
+		title = strings.TrimSpace(title[6:])
+	}
+	if title == "" {
+		return "Alternative mode"
+	}
+	return title
+}
+
+func slugChoiceValue(title string) string {
+	title = strings.ToLower(title)
+	var b strings.Builder
+	lastUnderscore := false
+	for _, r := range title {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastUnderscore = false
+			continue
+		}
+		if !lastUnderscore {
+			b.WriteRune('_')
+			lastUnderscore = true
+		}
+	}
+	value := strings.Trim(b.String(), "_")
+	if value == "" {
+		return "option"
+	}
+	return value
+}
+
+func isLikelyFieldName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func inferChoiceGroupLabel(help string) string {
+	lower := strings.ToLower(help)
+	switch {
+	case strings.Contains(lower, "api key"),
+		strings.Contains(lower, "api keys"),
+		strings.Contains(lower, "authentication"),
+		strings.Contains(lower, "token"):
+		return "Authentication"
+	default:
+		return "Choose one option"
+	}
+}
+
+func isAuthenticationChoiceGroup(label, help string) bool {
+	lower := strings.ToLower(label + " " + help)
+	return strings.Contains(lower, "authentication") ||
+		strings.Contains(lower, "api key") ||
+		strings.Contains(lower, "api keys") ||
+		strings.Contains(lower, "token")
+}
+
+func choiceGroupHasOption(group providerChoiceGroup, optionValue string) bool {
+	for _, option := range group.Options {
+		if option.Value == optionValue {
+			return true
+		}
+	}
+	return false
 }
 
 func readRawConfig(path string) (config rawConfig, err error) {
@@ -651,21 +1165,21 @@ func (h *handlers) makePageData(message, errMessage string) (data pageData, err 
 		passwordIsDefault = false
 	}
 	return pageData{
-		Rows:             rows,
-		ConfigEntries:    buildConfigEntries(config.Settings, liveMap),
-		ConfigJSONB64:    encodeJSONToBase64(string(configJSON)),
-		SchemasJSONB64:   encodeJSONToBase64(string(schemasJSON)),
-		RootURL:          h.rootURL,
-		Message:          html.EscapeString(message),
-		Error:            html.EscapeString(errMessage),
-		Editable:         h.configEditable,
-		AdminUnlocked:    false,
+		Rows:              rows,
+		ConfigEntries:     buildConfigEntries(config.Settings, liveMap),
+		ConfigJSONB64:     encodeJSONToBase64(string(configJSON)),
+		SchemasJSONB64:    encodeJSONToBase64(string(schemasJSON)),
+		RootURL:           h.rootURL,
+		Message:           html.EscapeString(message),
+		Error:             html.EscapeString(errMessage),
+		Editable:          h.configEditable,
+		AdminUnlocked:     false,
 		PasswordIsDefault: passwordIsDefault,
-		DisabledReason:   html.EscapeString(`The "CONFIG" environment variable is set and overrides config.json.`),
-		StatusTableEmpty: len(rows) == 0,
-		ProviderCount:    len(h.schemas),
-		ConfiguredCount:  len(config.Settings),
-		CurrentPeriod:    html.EscapeString(h.currentPeriod()),
+		DisabledReason:    html.EscapeString(`The "CONFIG" environment variable is set and overrides config.json.`),
+		StatusTableEmpty:  len(rows) == 0,
+		ProviderCount:     len(h.schemas),
+		ConfiguredCount:   len(config.Settings),
+		CurrentPeriod:     html.EscapeString(h.currentPeriod()),
 	}, nil
 }
 
